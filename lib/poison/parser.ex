@@ -33,8 +33,7 @@ defmodule Poison.Parser do
     | {:error, {:invalid, String.t}}
   def parse(iodata, options \\ []) do
     string = IO.iodata_to_binary(iodata)
-    {rest, pos} = skip_whitespace(string, 0)
-    {value, pos, rest} = value(rest, pos, options[:keys])
+    {value, pos, rest} = value(string, 0, options[:keys])
     case skip_whitespace(rest, pos) do
       {"", _pos} -> {:ok, value}
       {other, pos} -> syntax_error(other, pos)
@@ -58,16 +57,17 @@ defmodule Poison.Parser do
     end
   end
 
+  defp value(<<char>> <> rest, pos, keys) when char in '\s\n\t\r' do
+    value(rest, pos + 1, keys)
+  end
   defp value("\"" <> rest, pos, _keys) do
     string_continue(rest, pos+1, [])
   end
   defp value("{" <> rest, pos, keys) do
-    {rest, pos} = skip_whitespace(rest, pos+1)
-    object_pairs(rest, pos, keys, [])
+    object_pairs(rest, pos + 1, keys, [])
   end
   defp value("[" <> rest, pos, keys) do
-    {rest, pos} = skip_whitespace(rest, pos+1)
-    array_values(rest, pos, keys, [])
+    array_values(rest, pos + 1, keys, [])
   end
 
   defp value("null" <> rest, pos, _keys),  do: {nil, pos+4, rest}
@@ -82,32 +82,33 @@ defmodule Poison.Parser do
 
   ## Objects
 
+  defp object_pairs(<<char>> <> rest, pos, keys, acc) when char in '\s\n\t\r' do
+    object_pairs(rest, pos + 1, keys, acc)
+  end
   defp object_pairs("\"" <> rest, pos, keys, acc) do
-    {name, pos, rest} = string_continue(rest, pos+1, [])
-    {value, pos, rest} = case skip_whitespace(rest, pos) do
-      {":" <> rest, pos} ->
-        {rest, pos} = skip_whitespace(rest, pos+1)
-        value(rest, pos, keys)
-      {other, pos} ->
+    {name, value, pos, rest} = case string_continue(rest, pos + 1, []) do
+      {name, pos, ":" <> rest} ->
+        {value, pos, rest} = value(rest, pos + 1, keys)
+        {name, value, pos, rest}
+      {_name, pos, other} ->
         syntax_error(other, pos)
     end
 
     acc = [{object_name(name, keys), value} | acc]
-    case skip_whitespace(rest, pos) do
-      {"," <> rest, pos} ->
-        {rest, pos} = skip_whitespace(rest, pos+1)
-        object_pairs(rest, pos, keys, acc)
-      {"}" <> rest, pos} ->
-        {:maps.from_list(acc), pos+1, rest}
-      {other, pos} ->
+
+    case rest do
+      "," <> rest ->
+        object_pairs(rest, pos + 1, keys, acc)
+      "}" <> rest ->
+        {rest, pos} = skip_whitespace(rest, pos + 1)
+        {:maps.from_list(acc), pos, rest}
+      other ->
         syntax_error(other, pos)
     end
   end
-
   defp object_pairs("}" <> rest, pos, _, []) do
     {:maps.new, pos+1, rest}
   end
-
   defp object_pairs(other, pos, _, _), do: syntax_error(other, pos)
 
   defp object_name(name, :atoms),  do: String.to_atom(name)
@@ -116,21 +117,24 @@ defmodule Poison.Parser do
 
   ## Arrays
 
+  defp array_values(<<char>> <> rest, pos, keys, acc) when char in '\s\n\t\r' do
+    array_values(rest, pos + 1, keys, acc)
+  end
   defp array_values("]" <> rest, pos, _, []) do
-    {[], pos+1, rest}
+    {[], pos + 1, rest}
   end
 
   defp array_values(string, pos, keys, acc) do
     {value, pos, rest} = value(string, pos, keys)
 
     acc = [value | acc]
-    case skip_whitespace(rest, pos) do
-      {"," <> rest, pos} ->
-        {rest, pos} = skip_whitespace(rest, pos+1)
-        array_values(rest, pos, keys, acc)
-      {"]" <> rest, pos} ->
-        {:lists.reverse(acc), pos+1, rest}
-      {other, pos} ->
+    case rest do
+      "," <> rest ->
+        array_values(rest, pos + 1, keys, acc)
+      "]" <> rest ->
+        {rest, pos} = skip_whitespace(rest, pos + 1)
+        {:lists.reverse(acc), pos, rest}
+      other ->
         syntax_error(other, pos)
     end
   end
@@ -139,7 +143,7 @@ defmodule Poison.Parser do
 
   defp number_start("-" <> rest, pos) do
     case rest do
-      "0" <> rest -> number_frac(rest, pos+2, ["-0"])
+      "0" <> rest -> number_frac(rest, pos+2, '-0')
       rest -> number_int(rest, pos+1, [?-])
     end
   end
@@ -154,14 +158,14 @@ defmodule Poison.Parser do
 
   defp number_int(<<char, _ :: binary>> = string, pos, acc) when char in '123456789' do
     {digits, pos, rest} = number_digits(string, pos)
-    number_frac(rest, pos, [acc, digits])
+    number_frac(rest, pos, [acc | digits])
   end
 
   defp number_int(other, pos, _), do: syntax_error(other, pos)
 
   defp number_frac("." <> rest, pos, acc) do
-    {digits, pos, rest} = number_digits(rest, pos+1)
-    number_exp(rest, true, pos, [acc, ?., digits])
+    {digits, pos, rest} = number_digits(rest, pos + 1)
+    number_exp(rest, true, pos, [acc, ?. | digits])
   end
 
   defp number_frac(string, pos, acc) do
@@ -169,21 +173,23 @@ defmodule Poison.Parser do
   end
 
   defp number_exp(<<e>> <> rest, frac, pos, acc) when e in 'eE' do
-    e = if frac, do: ?e, else: ".0e"
+    e = if frac, do: 'e', else: ".0e"
     case rest do
       "-" <> rest -> number_exp_continue(rest, pos+2, [acc, e, ?-])
-      "+" <> rest -> number_exp_continue(rest, pos+2, [acc, e])
-      rest -> number_exp_continue(rest, pos+1, [acc, e])
+      "+" <> rest -> number_exp_continue(rest, pos+2, [acc | e])
+      rest -> number_exp_continue(rest, pos+1, [acc | e])
     end
   end
 
   defp number_exp(string, frac, pos, acc) do
-    {number_complete(acc, frac), pos, string}
+    {rest, pos} = skip_whitespace(string, pos)
+    {number_complete(acc, frac), pos, rest}
   end
 
   defp number_exp_continue(rest, pos, acc) do
     {digits, pos, rest} = number_digits(rest, pos)
-    {number_complete([acc, digits], true), pos, rest}
+    {rest, pos} = skip_whitespace(rest, pos)
+    {number_complete([acc | digits], true), pos, rest}
   end
 
   defp number_complete(iolist, false) do
@@ -211,7 +217,8 @@ defmodule Poison.Parser do
   ## Strings
 
   defp string_continue("\"" <> rest, pos, acc) do
-    {IO.iodata_to_binary(acc), pos+1, rest}
+    {rest, pos} = skip_whitespace(rest, pos + 1)
+    {IO.iodata_to_binary(acc), pos, rest}
   end
 
   defp string_continue("\\" <> rest, pos, acc) do
